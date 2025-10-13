@@ -1,0 +1,28 @@
+# Конфигурация бота для голосования
+# Скопируйте этот файл в .env и заполните своими данными
+
+# Токен бота (получите у @BotFather)
+BOT_TOKEN=8330496751:AAFL26am8DeZrpNoJNPaehQIuP-sYyE-QN0
+
+# ID администраторов (через запятую)
+ADMIN_IDS=802373523,665509323
+
+# Настройки базы данных
+DATABASE_PATH=voting_bot.db
+
+# Настройки голосования (ручной режим)
+VOTING_ACTIVE=true
+
+# Настройки CAPTCHA
+CAPTCHA_LENGTH=4
+CAPTCHA_WIDTH=200
+CAPTCHA_HEIGHT=100
+
+# Папки для файлов
+CAPTCHA_FOLDER=captcha_images
+EXPORT_FOLDER=exports
+
+# Дополнительные настройки
+DEBUG=false
+LOG_LEVEL=INFO
+

@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  voting-bot:
+    build: .
+    container_name: voting-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - bot-network
+
+networks:
+  bot-network:
+    driver: bridge

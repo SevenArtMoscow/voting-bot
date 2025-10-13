@@ -1,0 +1,8 @@
+python-telegram-bot==20.7
+Pillow==10.1.0
+sqlite3
+datetime
+csv
+os
+random
+string
