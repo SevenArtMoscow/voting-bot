@@ -2,7 +2,7 @@
 # Скопируйте этот файл в .env и заполните своими данными
 
 # Токен бота (получите у @BotFather)
-BOT_TOKEN=8330496751:AAFL26am8DeZrpNoJNPaehQIuP-sYyE-QN0
+BOT_TOKEN=YOUR_BOT_TOKEN
 
 # ID администраторов (через запятую)
 ADMIN_IDS=802373523,665509323
@@ -21,6 +21,9 @@ CAPTCHA_HEIGHT=100
 # Папки для файлов
 CAPTCHA_FOLDER=captcha_images
 EXPORT_FOLDER=exports
+
+# Сайт ознакомления (GitHub Pages)
+SITE_URL=https://sevenartmoscow.github.io/voting-bot/
 
 # Дополнительные настройки
 DEBUG=false

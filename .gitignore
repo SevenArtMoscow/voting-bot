@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+voting_bot.db
+captcha_images/
+exports/

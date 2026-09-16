@@ -443,3 +443,37 @@ class Database:
             'duplicate_names': duplicate_names,
             'duplicate_ids': duplicate_ids
         }
+
+    def get_public_board(self, candidates, voting_active):
+        """Публичные данные для сайта: кандидаты и итоги без служебных полей."""
+        stats = self.get_voting_stats()
+        votes_by_id = {int(row[0]): int(row[1] or 0) for row in stats['results']}
+        items = []
+        total = 0
+        for candidate in candidates:
+            votes = votes_by_id.get(candidate['id'], 0)
+            total += votes
+            items.append({
+                'id': candidate['id'],
+                'name': candidate['name'],
+                'votes': votes,
+            })
+        for item in items:
+            item['percent'] = round((item['votes'] / total) * 100, 1) if total else 0
+        return {
+            'active': bool(voting_active),
+            'total_votes': total,
+            'registered': stats['total_users'],
+            'voted_users': stats['voted_users'],
+            'candidates': items,
+        }
+
+    def reset_voting(self):
+        """Сброс голосов, статусов и результатов"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM votes')
+        cursor.execute('UPDATE users SET has_voted = 0, vote_timestamp = NULL')
+        cursor.execute('UPDATE results SET real_votes = 0, fake_votes = 0, total_votes = 0')
+        conn.commit()
+        conn.close()

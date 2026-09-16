@@ -1,14 +1,21 @@
 # Основной файл бота для голосования
 import logging
 import os
+import sys
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
-from config import BOT_TOKEN, ADMIN_IDS, CANDIDATES, VOTING_ACTIVE
+import config
+from config import BOT_TOKEN, ADMIN_IDS, CANDIDATES, VOTING_ACTIVE, SITE_URL
 from database import Database
 from captcha import CaptchaGenerator
+from web_server import start_web_server
 
 # Настройка логирования
 logging.basicConfig(
@@ -33,9 +40,83 @@ class UserState:
     ADMIN_REMOVE_VOTES = "admin_remove_votes"
     ADMIN_ANNOUNCE = "admin_announce"
 
+BTN_VOTE = "🗳️ Голосование"
+BTN_STATS = "📊 Статистика"
+BTN_ADMIN = "👑 Админ-панель"
+BTN_HELP = "ℹ️ Помощь"
+BTN_SITE = "📖 Ознакомление"
+
+BUSY_STATES = {
+    UserState.REGISTRATION_NAME,
+    UserState.REGISTRATION_COURSE,
+    UserState.REGISTRATION_CAPTCHA,
+    UserState.ADMIN_ADD_VOTES,
+    UserState.ADMIN_REMOVE_VOTES,
+}
+
+
 def is_admin(user_id):
     """Проверка прав администратора"""
     return user_id in ADMIN_IDS
+
+
+def main_keyboard(user_id):
+    """Постоянная клавиатура внизу экрана"""
+    if is_admin(user_id):
+        rows = [
+            [BTN_VOTE, BTN_STATS],
+            [BTN_SITE, BTN_ADMIN],
+            [BTN_HELP],
+        ]
+    else:
+        rows = [
+            [BTN_VOTE, BTN_SITE],
+            [BTN_HELP],
+        ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def site_link_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ознакомление", url=SITE_URL)],
+        [InlineKeyboardButton("Голосование", callback_data="open_vote")],
+    ])
+
+
+def admin_inline_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("🗳️ Голоса", callback_data="admin_votes")],
+        [InlineKeyboardButton("➕ Накрутить голоса", callback_data="admin_add_votes")],
+        [InlineKeyboardButton("➖ Отнять голоса", callback_data="admin_remove_votes")],
+        [InlineKeyboardButton("🏆 Объявить победителя", callback_data="admin_announce")],
+        [InlineKeyboardButton("📥 Экспорт данных", callback_data="admin_export")],
+        [InlineKeyboardButton("🔄 Сброс голосования", callback_data="admin_reset")],
+        [InlineKeyboardButton("🧹 Очистить дубли", callback_data="admin_cleanup")],
+        [InlineKeyboardButton("🔍 Проверить дубли", callback_data="admin_check_duplicates")],
+        [InlineKeyboardButton("⏸️ Остановить голосование", callback_data="admin_stop_voting")],
+        [InlineKeyboardButton("▶️ Запустить голосование", callback_data="admin_start_voting")],
+    ])
+
+
+def get_reply_target(update: Update):
+    if update.message:
+        return update.message
+    if update.callback_query and update.callback_query.message:
+        return update.callback_query.message
+    return None
+
+
+def voting_status_text():
+    status = "🟢 урна открыта" if config.VOTING_ACTIVE else "🔴 урна закрыта"
+    stats = db.get_voting_stats()
+    return (
+        f"🗳️ Система голосования\n\n"
+        f"Статус: {status}\n"
+        f"Кандидатов: {len(CANDIDATES)}\n"
+        f"Всего голосов: {stats['voted_users']}"
+    )
 
 def get_candidate_name(candidate_id):
     """Получение имени кандидата по ID"""
@@ -44,29 +125,44 @@ def get_candidate_name(candidate_id):
             return f"{candidate['emoji']} {candidate['name']}"
     return "Неизвестный кандидат"
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Логирование ошибок обработчиков"""
+    logger.error("Ошибка при обработке обновления: %s", context.error, exc_info=context.error)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user_id = update.effective_user.id
+    logger.info("/start от пользователя %s", user_id)
     user = db.get_user(user_id)
-    
-    if user:
-        # Пользователь уже зарегистрирован
-        if user['has_voted']:
-            await update.message.reply_text(
-                "✅ Вы уже проголосовали!\n\n"
-                "Ваш голос учтен. Спасибо за участие в голосовании! 🎉"
-            )
-        else:
-            # Показываем меню голосования
-            await show_voting_menu(update, context)
-    else:
-        # Начинаем регистрацию
+
+    if not user and not is_admin(user_id):
         user_states[user_id] = UserState.REGISTRATION_NAME
         await update.message.reply_text(
             "👋 Добро пожаловать в систему голосования!\n\n"
             "Для участия в голосовании необходимо пройти регистрацию.\n\n"
             "📝 Введите ваше ФИО (например: Иванов Иван Иванович):"
         )
+        return
+
+    user_states.pop(user_id, None)
+    await update.message.reply_text(
+        voting_status_text() + f"\n\n📖 Ознакомление:\n{SITE_URL}",
+        reply_markup=main_keyboard(user_id)
+    )
+    await update.message.reply_text(
+        "Ознакомление — сайт кандидатов. Голосование — только в этом боте.",
+        reply_markup=site_link_keyboard()
+    )
+
+    if is_admin(user_id):
+        await update.message.reply_text(
+            "👑 АДМИН ПАНЕЛЬ\n\nВыберите действие:",
+            reply_markup=admin_inline_keyboard()
+        )
+
+    if user:
+        await show_voting_menu(update, context)
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /myid"""
@@ -98,7 +194,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
     else:
         # Помощь для обычных пользователей
-        help_text = """
+        help_text = f"""
 📚 ПОМОЩЬ
 
 Доступные команды:
@@ -107,7 +203,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /myid - Узнать свой Telegram ID
 /help - Показать эту справку
 
-Используйте /start для участия в голосовании
+Сайт для ознакомления: {SITE_URL}
+Голосование принимается только в Telegram.
         """
     
     await update.message.reply_text(help_text)
@@ -120,27 +217,10 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ У вас нет доступа к этой команде.")
         return
     
-    keyboard = [
-        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
-        [InlineKeyboardButton("🗳️ Голоса", callback_data="admin_votes")],
-        [InlineKeyboardButton("➕ Накрутить голоса", callback_data="admin_add_votes")],
-        [InlineKeyboardButton("➖ Отнять голоса", callback_data="admin_remove_votes")],
-        [InlineKeyboardButton("🏆 Объявить победителя", callback_data="admin_announce")],
-        [InlineKeyboardButton("📥 Экспорт данных", callback_data="admin_export")],
-        [InlineKeyboardButton("🔄 Сброс голосования", callback_data="admin_reset")],
-        [InlineKeyboardButton("🧹 Очистить дубли", callback_data="admin_cleanup")],
-        [InlineKeyboardButton("🔍 Проверить дубли", callback_data="admin_check_duplicates")],
-        [InlineKeyboardButton("⏸️ Остановить голосование", callback_data="admin_stop_voting")],
-        [InlineKeyboardButton("▶️ Запустить голосование", callback_data="admin_start_voting")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(
         "👑 АДМИН ПАНЕЛЬ\n\n"
         "Выберите действие:",
-        reply_markup=reply_markup
+        reply_markup=admin_inline_keyboard()
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -216,40 +296,48 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /reset"""
     user_id = update.effective_user.id
+    message = get_reply_target(update)
+    if not message:
+        return
     
     if not is_admin(user_id):
-        await update.message.reply_text("❌ У вас нет доступа к этой команде.")
+        await message.reply_text("❌ У вас нет доступа к этой команде.")
         return
     
     keyboard = [
         [InlineKeyboardButton("✅ Да, сбросить", callback_data="reset_confirm")],
         [InlineKeyboardButton("❌ Отмена", callback_data="reset_cancel")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    await message.reply_text(
         "⚠️ ВНИМАНИЕ!\n\n"
         "Вы собираетесь сбросить все данные голосования.\n"
         "Это действие нельзя отменить!\n\n"
         "Продолжить?",
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def show_voting_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показ меню голосования"""
     user_id = update.effective_user.id
     user = db.get_user(user_id)
+    message = update.message or (update.callback_query.message if update.callback_query else None)
+    if not message:
+        return
     
     if not user:
-        await update.message.reply_text("❌ Сначала пройдите регистрацию командой /start")
+        await message.reply_text("❌ Сначала пройдите регистрацию командой /start")
         return
     
-    if user['has_voted']:
-        await update.message.reply_text("✅ Вы уже проголосовали!")
+    if user['has_voted'] and not is_admin(user_id):
+        await message.reply_text(
+            "✅ Вы уже проголосовали!\nВаш голос учтен.",
+            reply_markup=main_keyboard(user_id)
+        )
         return
     
-    if not VOTING_ACTIVE:
-        await update.message.reply_text("❌ Голосование приостановлено администратором.")
+    if not config.VOTING_ACTIVE:
+        await message.reply_text("❌ Голосование приостановлено администратором.")
         return
     
     keyboard = []
@@ -259,13 +347,11 @@ async def show_voting_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"vote_{candidate['id']}"
         )])
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
+    await message.reply_text(
         f"🗳️ ГОЛОСОВАНИЕ\n\n"
         f"Привет, {user['full_name']}!\n\n"
         f"Выберите кандидата:",
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -489,9 +575,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     user_id = update.effective_user.id
     text = update.message.text
+    state = user_states.get(user_id)
+
+    if text in {BTN_VOTE, BTN_STATS, BTN_ADMIN, BTN_HELP, BTN_SITE} and state not in BUSY_STATES:
+        if text == BTN_VOTE:
+            await show_voting_menu(update, context)
+        elif text == BTN_STATS:
+            if is_admin(user_id):
+                await show_stats(update, context)
+            else:
+                await update.message.reply_text("❌ Статистика доступна только администратору.")
+        elif text == BTN_ADMIN:
+            await admin_command(update, context)
+        elif text == BTN_SITE:
+            await update.message.reply_text(
+                f"Ознакомление с кандидатами:\n{SITE_URL}\n\nГолосование — только в этом боте.",
+                reply_markup=site_link_keyboard()
+            )
+        elif text == BTN_HELP:
+            await help_command(update, context)
+        return
     
     if user_id not in user_states:
-        await update.message.reply_text("❌ Неизвестная команда. Используйте /start для начала.")
+        await update.message.reply_text(
+            "Используйте кнопки меню или /start",
+            reply_markup=main_keyboard(user_id)
+        )
         return
     
     state = user_states[user_id]
@@ -553,9 +662,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del context.user_data['course']
                 
                 await update.message.reply_text(
-                    "✅ Регистрация успешна!\n\n"
-                    "Теперь вы можете голосовать. Используйте /start для начала голосования."
+                    "✅ Регистрация успешна!\n\nТеперь вы можете голосовать.",
+                    reply_markup=main_keyboard(user_id)
                 )
+                await show_voting_menu(update, context)
             elif result == "telegram_id_exists":
                 await update.message.reply_text(
                     "❌ Вы уже зарегистрированы в системе!\n"
@@ -629,6 +739,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data
     
     # Обработка голосования
+    if data == "open_vote":
+        await show_voting_menu(update, context)
+        return
+
     if data.startswith("vote_"):
         if not is_admin(user_id):
             # Проверяем, может ли пользователь голосовать
@@ -803,8 +917,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     
     # Обработка сброса
     elif data == "reset_confirm":
-        # Здесь можно добавить логику сброса данных
-        await query.edit_message_text("🔄 Сброс данных выполнен.")
+        db.reset_voting()
+        await query.edit_message_text("🔄 Сброс данных выполнен. Все голоса обнулены.")
     
     elif data == "reset_cancel":
         await query.edit_message_text("❌ Сброс отменен.")
@@ -837,8 +951,10 @@ def main():
     
     # Добавляем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
     
     # Запускаем бота с обработкой ошибок
+    start_web_server()
     print("🤖 Бот запущен!")
     try:
         application.run_polling()
